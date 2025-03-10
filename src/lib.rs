@@ -39,13 +39,13 @@ impl Packed for bool {
     const SIZE: usize = 1;
 
     fn unpack(bytes: &[u8], offset: usize) -> Self {
-        assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
         let i = offset / 8;
         bytes[i] & 1 << (7 - offset % 8) != 0
     }
 
     fn pack(self, bytes: &mut [u8], offset: usize) {
-        assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
         bytes[offset / 8] &= !(1 << (7 - offset % 8));
         bytes[offset / 8] |= u8::from(self) << (7 - offset % 8);
     }
@@ -58,14 +58,46 @@ where
     const SIZE: usize = N * T::SIZE;
 
     fn unpack(bytes: &[u8], offset: usize) -> Self {
-        assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
         std::array::from_fn::<_, N, _>(|i| T::unpack(bytes, offset + i * T::SIZE))
     }
 
     fn pack(self, bytes: &mut [u8], offset: usize) {
-        assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
         for (i, x) in self.into_iter().enumerate() {
             x.pack(bytes, offset + i * T::SIZE);
+        }
+    }
+}
+
+impl Packed for u8 {
+    const SIZE: usize = Self::BITS as _;
+
+    fn unpack(bytes: &[u8], offset: usize) -> Self {
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        let bytes = &bytes[offset / 8..];
+        let offset = offset % 8;
+
+        let mut out = bytes[0] << offset;
+        if offset != 0 {
+            out |= bytes[1] >> (8 - offset)
+        }
+        out
+    }
+
+    fn pack(self, bytes: &mut [u8], offset: usize) {
+        debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
+        let bytes = &mut bytes[offset / 8..];
+        let offset = offset % 8;
+
+        if offset == 0 {
+            bytes[0] = self;
+        } else {
+            bytes[0] &= !((1 << (8 - offset)) - 1);
+            bytes[0] |= self >> offset;
+            let mask: u8 = (1 << offset) - 1;
+            let b = bytes[1] & !(mask << (8 - offset));
+            bytes[1] = (self & mask) << (8 - offset) | b;
         }
     }
 }
@@ -76,77 +108,24 @@ macro_rules! packed_int {
             const SIZE: usize = Self::BITS as _;
 
             fn unpack(bytes: &[u8], offset: usize) -> Self {
-                assert!(bytes.len() * 8 - offset >= Self::SIZE);
-                let bytes = &bytes[offset / 8..];
-                let offset = offset % 8;
-
-                let mut out = (bytes[0] as Self) << (offset);
-
-                for b in bytes.iter().take(Self::BITS as usize / 8).skip(1) {
-                    #[allow(arithmetic_overflow)]
-                    {
-                        out <<= 8;
-                    }
-                    out |= (*b as Self) << offset;
-                }
-
-                if offset != 0 {
-                    out |= (bytes[std::mem::size_of::<Self>()] as Self) >> (8 - offset)
-                }
-
-                out
+                debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
+                let x = Packed::unpack(bytes, offset);
+                Self::from_be_bytes(x)
             }
 
             fn pack(self, bytes: &mut [u8], offset: usize) {
-                assert!(bytes.len() * 8 - offset >= Self::SIZE);
-                let bytes = &mut bytes[offset / 8..];
-                let offset = offset % 8;
-                let bytes01 = (self >> offset).to_be_bytes();
-
-                if offset != 0 {
-                    bytes[0] &= !((1 << (8 - offset)) - 1);
-                    bytes[0] |= bytes01[0];
-                } else {
-                    bytes[0] = bytes01[0];
-                }
-
-                for (i, b) in bytes01.into_iter().enumerate().skip(1) {
-                    bytes[i] = b;
-                }
-
-                if offset != 0 {
-                    let mask: u8 = (1 << offset) - 1;
-                    let byte = &mut bytes[std::mem::size_of::<Self>()];
-                    let b = *byte & !(mask << (8 - offset));
-                    *byte = (self as u8 & mask) << (8 - offset) | b;
-                }
+                debug_assert!(bytes.len() * 8 - offset >= Self::SIZE);
+                self.to_be_bytes().pack(bytes, offset);
             }
         }
     };
-    // this is kind of cursed, but it's finnneeeee
-    ($from: ident => $to: ident) => {
-        impl Packed for $to {
-            const SIZE: usize = <$from>::SIZE;
-
-            fn unpack(bytes: &[u8], offset: usize) -> Self {
-                $from::unpack(bytes, offset) as _
-            }
-
-            fn pack(self, bytes: &mut [u8], offset: usize) {
-                (self as $from).pack(bytes, offset);
-            }
-        }
-    };
-    ($($ty: ident),+$(,)?) => {
+    ($($ty: ident),+) => {
         $(packed_int!($ty);)+
-    };
-    ($($from: ident => $to: ident),+$(,)?) => {
-        $(packed_int!($from => $to);)+
     };
 }
 
-packed_int!(u8, u16, u32, u64, u128, usize);
-packed_int!(u8 => i8, u16 => i16, u32 => i32, u64 => i64, u128 => i128, usize => isize);
+packed_int!(u16, u32, u64, u128, usize);
+packed_int!(i8, i16, i32, i64, i128, isize);
 
 impl Packed for () {
     const SIZE: usize = 0;
